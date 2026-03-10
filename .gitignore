@@ -1,0 +1,12 @@
+# Compiled schema
+schemas/gschemas.compiled
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Packaged extension
+*.zip

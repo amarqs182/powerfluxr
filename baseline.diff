@@ -1,0 +1,590 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..16b4973
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,12 @@
++# Compiled schema
++schemas/gschemas.compiled
++
++# Editor / OS files
++.vscode/
++.idea/
++*.swp
++*~
++.DS_Store
++
++# Packaged extension
++*.zip
+diff --git a/LICENSE b/LICENSE
+new file mode 100644
+index 0000000..8895132
+--- /dev/null
++++ b/LICENSE
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2024 PowerFluxr Contributors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..dbceb11
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,19 @@
++# PowerFluxr
++
++Adaptive power management extension for GNOME. This extension automatically controls the system's energy profile, display brightness, and screen timeout based on the current power source and battery level, without polling.
++
++## Features
++- **Performance (🚀)**: Applied automatically when the device is plugged into the charger (AC).
++- **Balanced (⚖️)**: Applied automatically when the device is running on battery and the battery level is above a specified threshold.
++- **Power-saver (🪫)**: Applied automatically when the device is on battery and the capacity drops below the `low-battery-threshold` (configurable between 5% and 50%).
++- Automatic Screen Brightness Adjustment per profile. (Note: The `brightnessctl` fallback will be removed in the future to keep the extension as native as possible).
++- Automatic Screen Timeout (idle-delay) Adjustment per profile.
++
++## Compatibility
++Works with GNOME 45, 46, 47, 48, and 49.
++
++## Installation
++Clone the repository and build using standard GNOME extension installation steps, or install via extensions.gnome.org (if published).
++
++## Licensing
++This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+diff --git a/documentation.md b/documentation.md
+new file mode 100644
+index 0000000..3493226
+--- /dev/null
++++ b/documentation.md
+@@ -0,0 +1,41 @@
++# PowerFluxr Documentation
++
++PowerFluxr is an adaptive power management extension for GNOME. It automatically controls the system's energy profile, display brightness, and screen timeout based on the current power source and battery level, without the use of polling loops, relying purely on DBus signals.
++
++## Architecture & DBus Interfaces
++
++The extension communicates with standard Linux desktop interfaces over system DBus:
++- **`net.hadess.PowerProfiles`**: To read and set the active power profile (`performance`, `balanced`, or `power-saver`).
++- **`org.freedesktop.UPower`**: To detect if the system is currently on battery power (`OnBattery`).
++- **`org.freedesktop.UPower.Device` (DisplayDevice)**: To read the primary battery's charge percentage and charging state.
++
++### Event-Driven Design
++PowerFluxr uses a debounce mechanism. When rapid DBus property changes occur (e.g. battery percentage drops or AC is unplugged), it schedules a single evaluation after 200ms to avoid applying settings redundantly.
++
++## Profiles and Automation Lógica
++
++PowerFluxr automatically switches between three power states based on predefined rules:
++
++1. **Performance (🚀)**: Applied automatically when the device is plugged into the charger (AC).
++2. **Balanced (⚖️)**: Applied automatically when the device is running on battery and the battery level is above a user-specified threshold.
++3. **Power-saver (🪫)**: Applied automatically when the device is on battery and the capacity drops below the `low-battery-threshold` (configurable between 5% and 50%).
++
++### Auto-Applied Settings
++Whenever a profile switch occurs (either automatically by the rules above or manually by the user via GNOME quick settings), PowerFluxr immediately applies:
++- **Screen Brightness**: Target brightness percentage is applied by manipulating the GNOME Quick Settings slider directly. If this fails, it currently uses `brightnessctl` via a subprocess as a fallback (Note: The `brightnessctl` fallback will be removed in the future to keep the extension as native as possible).
++- **Screen Timeout (idle-delay)**: Modifies the `org.gnome.desktop.session:idle-delay` GSettings key to adjust the time until the screen turns off due to inactivity.
++
++## Preferences UI ([prefs.js](file:///home/alman/Downloads/powerfluxr/prefs.js))
++
++PowerFluxr offers a fully integrated libadwaita preferences window with groups for:
++- **Automation Settings**: A SpinRow to adjust the "Low battery threshold" at which the system activates the power-saver profile.
++- **Per-Profile Configuration**: Groups for *Performance*, *Balanced*, and *Power Saver*. Each group contains:
++  - **Brightness**: A SpinRow configuring the exact screen brightness percentage (1-100%).
++  - **Screen Timeout**: A ComboRow with pre-set intervals ranging from "1 minute" up to "30 minutes", or "Never".
++
++## Project Files
++
++- **[metadata.json](file:///home/alman/Downloads/powerfluxr/metadata.json)**: Standard GNOME extension metadata defining compatibility for GNOME 45–49.
++- **[extension.js](file:///home/alman/Downloads/powerfluxr/extension.js)**: Core extension logic, DBus proxy setups, automatic power profile evaluation, and enforcement of brightness/timeout.
++- **[prefs.js](file:///home/alman/Downloads/powerfluxr/prefs.js)**: GUI for extension preferences using Gtk4/libadwaita. Setup for settings bindings to `org.gnome.shell.extensions.powerfluxr`.
++- **`schemas/`**: GSettings schemas defining the underlying storage (e.g., `performance-brightness`, `low-battery-threshold`).
+diff --git a/extension.js b/extension.js
+new file mode 100644
+index 0000000..281200a
+--- /dev/null
++++ b/extension.js
+@@ -0,0 +1,258 @@
++// PowerFluxr — extension.js v1
++// Adaptive power management for GNOME
++// Controls energy profile, brightness and screen timeout automatically
++// via UPower and power-profiles-daemon DBus signals — zero polling.
++
++import Gio from 'gi://Gio';
++import GLib from 'gi://GLib';
++import * as Main from 'resource:///org/gnome/shell/ui/main.js';
++import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
++
++const UPOWER_IFACE = `
++<node>
++  <interface name="org.freedesktop.UPower">
++    <property name="OnBattery" type="b" access="read"/>
++  </interface>
++</node>`;
++
++const UPOWER_DEVICE_IFACE = `
++<node>
++  <interface name="org.freedesktop.UPower.Device">
++    <property name="Percentage" type="d" access="read"/>
++    <property name="State"      type="u" access="read"/>
++  </interface>
++</node>`;
++
++const POWER_PROFILES_IFACE = `
++<node>
++  <interface name="net.hadess.PowerProfiles">
++    <property name="ActiveProfile" type="s" access="readwrite"/>
++  </interface>
++</node>`;
++
++const UPowerProxy        = Gio.DBusProxy.makeProxyWrapper(UPOWER_IFACE);
++const UPowerDeviceProxy  = Gio.DBusProxy.makeProxyWrapper(UPOWER_DEVICE_IFACE);
++const PowerProfilesProxy = Gio.DBusProxy.makeProxyWrapper(POWER_PROFILES_IFACE);
++
++export default class PowerFluxr extends Extension {
++
++    enable() {
++        this._settings          = this.getSettings('org.gnome.shell.extensions.powerfluxr');
++        this._upowerProxy       = null;
++        this._batteryProxy      = null;
++        this._profilesProxy     = null;
++        this._upowerChangedId   = 0;
++        this._batteryChangedId  = 0;
++        this._profilesChangedId = 0;
++        this._settingProfile    = false;
++        this._evalTimeout       = null;
++        this._lastBrightness    = -1;
++
++        this._initProxies();
++    }
++
++    disable() {
++        if (this._evalTimeout) {
++            GLib.source_remove(this._evalTimeout);
++            this._evalTimeout = null;
++        }
++
++        if (this._upowerProxy && this._upowerChangedId)
++            this._upowerProxy.disconnect(this._upowerChangedId);
++        if (this._batteryProxy && this._batteryChangedId)
++            this._batteryProxy.disconnect(this._batteryChangedId);
++        if (this._profilesProxy && this._profilesChangedId)
++            this._profilesProxy.disconnect(this._profilesChangedId);
++
++        this._upowerProxy       = null;
++        this._batteryProxy      = null;
++        this._profilesProxy     = null;
++        this._upowerChangedId   = 0;
++        this._batteryChangedId  = 0;
++        this._profilesChangedId = 0;
++        this._lastBrightness    = -1;
++        this._settings          = null;
++    }
++
++    // ── Setup ─────────────────────────────────────────────────────────────────
++
++    _initProxies() {
++        // 1. PowerProfiles — escuta mudança manual de perfil
++        this._profilesProxy = new PowerProfilesProxy(
++            Gio.DBus.system,
++            'net.hadess.PowerProfiles',
++            '/net/hadess/PowerProfiles',
++            (proxy, error) => {
++                if (error) {
++                    console.error('[PowerFluxr] PowerProfiles erro: ' + error);
++                    return;
++                }
++                this._profilesChangedId = proxy.connect('g-properties-changed',
++                    (_p, changed) => {
++                        const props = changed.deepUnpack();
++                        if ('ActiveProfile' in props) {
++                            if (this._settingProfile) return;
++                            const profile = props['ActiveProfile'].deepUnpack();
++                            console.log('[PowerFluxr] Perfil manual → ' + profile);
++                            this._applyBrightnessAndIdle(profile);
++                        }
++                    }
++                );
++            }
++        );
++
++        // 2. UPower — escuta mudança AC/bateria
++        this._upowerProxy = new UPowerProxy(
++            Gio.DBus.system,
++            'org.freedesktop.UPower',
++            '/org/freedesktop/UPower',
++            (proxy, error) => {
++                if (error) {
++                    console.error('[PowerFluxr] UPower erro: ' + error);
++                    return;
++                }
++                this._upowerChangedId = proxy.connect('g-properties-changed',
++                    (_p, changed) => {
++                        const props = changed.deepUnpack();
++                        if ('OnBattery' in props)
++                            this._scheduleEvaluate();
++                    }
++                );
++                this._initBatteryProxy();
++            }
++        );
++    }
++
++    _initBatteryProxy() {
++        // DisplayDevice = bateria principal do sistema (mais confiável que buscar por nome)
++        this._batteryProxy = new UPowerDeviceProxy(
++            Gio.DBus.system,
++            'org.freedesktop.UPower',
++            '/org/freedesktop/UPower/devices/DisplayDevice',
++            (proxy, error) => {
++                if (error) {
++                    console.error('[PowerFluxr] DisplayDevice erro: ' + error);
++                    this._scheduleEvaluate();
++                    return;
++                }
++                this._batteryChangedId = proxy.connect('g-properties-changed',
++                    (_p, changed) => {
++                        const props = changed.deepUnpack();
++                        if ('Percentage' in props || 'State' in props)
++                            this._scheduleEvaluate();
++                    }
++                );
++                this._scheduleEvaluate();
++            }
++        );
++    }
++
++    // ── Debounce — agrupa eventos rápidos em uma única avaliação ──────────────
++
++    _scheduleEvaluate() {
++        if (this._evalTimeout)
++            GLib.source_remove(this._evalTimeout);
++
++        this._evalTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
++            this._evalTimeout = null;
++            this._evaluate();
++            return GLib.SOURCE_REMOVE;
++        });
++    }
++
++    // ── Lógica principal ──────────────────────────────────────────────────────
++
++    _evaluate() {
++        if (!this._upowerProxy || !this._profilesProxy) return;
++
++        const onBattery = this._upowerProxy.OnBattery ?? true;
++        const pct       = this._batteryProxy
++            ? Math.round(this._batteryProxy.Percentage)
++            : 100;
++        const threshold = this._settings.get_int('low-battery-threshold');
++
++        let profile;
++        if (!onBattery)            profile = 'performance';
++        else if (pct <= threshold) profile = 'power-saver';
++        else                       profile = 'balanced';
++
++        console.log('[PowerFluxr] AC=' + !onBattery + ' bat=' + pct + '% → ' + profile);
++
++        // Só muda se for diferente do perfil atual
++        try {
++            if (this._profilesProxy.ActiveProfile !== profile) {
++                this._settingProfile = true;
++                this._profilesProxy.ActiveProfile = profile;
++                this._settingProfile = false;
++            }
++        } catch (e) {
++            this._settingProfile = false;
++            console.error('[PowerFluxr] Erro ao setar perfil: ' + e);
++        }
++
++        this._applyBrightnessAndIdle(profile);
++    }
++
++    _applyBrightnessAndIdle(profile) {
++        const s = this._settings;
++        let brightness, idleDelay;
++
++        switch (profile) {
++        case 'performance':
++            brightness = s.get_int('performance-brightness');
++            idleDelay  = s.get_int('performance-idle-delay');
++            break;
++        case 'balanced':
++            brightness = s.get_int('balanced-brightness');
++            idleDelay  = s.get_int('balanced-idle-delay');
++            break;
++        case 'power-saver':
++            brightness = s.get_int('power-saver-brightness');
++            idleDelay  = s.get_int('power-saver-idle-delay');
++            break;
++        default:
++            console.warn('[PowerFluxr] Perfil desconhecido: ' + profile);
++            return;
++        }
++
++        this._setBrightness(brightness);
++        this._setIdleDelay(idleDelay);
++    }
++
++    _setBrightness(percent) {
++        if (this._lastBrightness === percent) return;
++        this._lastBrightness = percent;
++
++        const safe = Math.max(1, Math.min(100, percent));
++
++        try {
++            const slider = Main.panel.statusArea.quickSettings
++                ._brightness.quickSettingsItems[0].slider;
++            slider.value = safe / 100;
++            console.log('[PowerFluxr] brilho=' + safe + '% (slider nativo)');
++        } catch (e) {
++            console.warn('[PowerFluxr] Fallback brightnessctl: ' + e);
++            try {
++                const proc = Gio.Subprocess.new(
++                    ['brightnessctl', 'set', safe + '%'],
++                    Gio.SubprocessFlags.NONE
++                );
++                proc.wait_async(null, (_, res) => {
++                    try { proc.wait_finish(res); }
++                    catch (err) { console.error('[PowerFluxr] brightnessctl: ' + err); }
++                });
++            } catch (err) {
++                console.error('[PowerFluxr] Subprocess erro: ' + err);
++            }
++        }
++    }
++
++    _setIdleDelay(seconds) {
++        try {
++            const ss = new Gio.Settings({ schema: 'org.gnome.desktop.session' });
++            ss.set_uint('idle-delay', seconds);
++        } catch (e) {
++            console.error('[PowerFluxr] idle-delay: ' + e);
++        }
++    }
++}
+diff --git a/metadata.json b/metadata.json
+new file mode 100644
+index 0000000..a8432bf
+--- /dev/null
++++ b/metadata.json
+@@ -0,0 +1,8 @@
++{
++  "uuid": "powerfluxr@local",
++  "name": "PowerFluxr",
++  "description": "Adaptive power management for GNOME — controls energy profile, brightness, screen timeout and hardware settings automatically",
++  "version": 1,
++  "shell-version": ["45", "46", "47", "48", "49"],
++  "url": ""
++}
+diff --git a/prefs.js b/prefs.js
+new file mode 100644
+index 0000000..fb8e706
+--- /dev/null
++++ b/prefs.js
+@@ -0,0 +1,141 @@
++// PowerFluxr — prefs.js v1
++// Adaptive power management for GNOME
++
++import Gtk from 'gi://Gtk';
++import Adw from 'gi://Adw';
++import { ExtensionPreferences } from
++    'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
++
++const IDLE_OPTIONS = [
++    [60,   '1 minuto'],
++    [120,  '2 minutos'],
++    [180,  '3 minutos'],
++    [300,  '5 minutos'],
++    [600,  '10 minutos'],
++    [900,  '15 minutos'],
++    [1800, '30 minutos'],
++    [0,    'Nunca'],
++];
++
++const PROFILES = [
++    {
++        id:       'performance',
++        title:    '⚡ Performance',
++        subtitle: 'Aplicado quando conectado ao carregador (AC)',
++    },
++    {
++        id:       'balanced',
++        title:    '⚖️ Balanceado',
++        subtitle: 'Aplicado ao usar na bateria',
++    },
++    {
++        id:       'power-saver',
++        title:    '🪫 Economia de energia',
++        subtitle: 'Aplicado quando a bateria está baixa',
++    },
++];
++
++export default class PowerFluxrPrefs extends ExtensionPreferences {
++
++    fillPreferencesWindow(window) {
++        const s = this.getSettings('org.gnome.shell.extensions.powerfluxr');
++
++        window.set_default_size(560, 700);
++        window.set_title('PowerFluxr');
++
++        const page = new Adw.PreferencesPage({
++            title:     'Configurações',
++            icon_name: 'battery-symbolic',
++        });
++        window.add(page);
++
++        // ── Grupo: Automação ──────────────────────────────────────────────────
++        const autoGroup = new Adw.PreferencesGroup({
++            title:       'Automação',
++            description: 'Troca de perfil automática conforme fonte de energia',
++        });
++        page.add(autoGroup);
++
++        const thresholdRow = new Adw.SpinRow({
++            title:    'Limite de bateria baixa',
++            subtitle: 'Abaixo desse % ativa Economia de energia',
++            adjustment: new Gtk.Adjustment({
++                lower: 5, upper: 50, step_increment: 5, page_increment: 10,
++                value: s.get_int('low-battery-threshold'),
++            }),
++            digits: 0,
++            snap_to_ticks: true,
++        });
++        thresholdRow.connect('notify::value', row => {
++            s.set_int('low-battery-threshold', row.value);
++        });
++        s.connect('changed::low-battery-threshold', () => {
++            thresholdRow.value = s.get_int('low-battery-threshold');
++        });
++        autoGroup.add(thresholdRow);
++
++        const acRow = new Adw.ActionRow({
++            title:    'No carregador (AC)',
++            subtitle: 'Ativa automaticamente → Performance',
++            icon_name: 'battery-full-charged-symbolic',
++        });
++        autoGroup.add(acRow);
++
++        const batRow = new Adw.ActionRow({
++            title:    'Na bateria',
++            subtitle: 'Ativa automaticamente → Balanceado (ou Economia se baixo)',
++            icon_name: 'battery-good-symbolic',
++        });
++        autoGroup.add(batRow);
++
++        // ── Grupos por perfil ─────────────────────────────────────────────────
++        for (const profile of PROFILES) {
++            const group = new Adw.PreferencesGroup({
++                title:       profile.title,
++                description: profile.subtitle,
++            });
++            page.add(group);
++
++            const brightnessRow = new Adw.SpinRow({
++                title:    'Brilho',
++                subtitle: 'Porcentagem do brilho da tela',
++                adjustment: new Gtk.Adjustment({
++                    lower: 1, upper: 100, step_increment: 5, page_increment: 10,
++                    value: s.get_int(profile.id + '-brightness'),
++                }),
++                digits: 0,
++                snap_to_ticks: true,
++            });
++            brightnessRow.connect('notify::value', row => {
++                s.set_int(profile.id + '-brightness', row.value);
++            });
++            s.connect('changed::' + profile.id + '-brightness', () => {
++                brightnessRow.value = s.get_int(profile.id + '-brightness');
++            });
++            group.add(brightnessRow);
++
++            const idleModel = new Gtk.StringList();
++            IDLE_OPTIONS.forEach(([, label]) => idleModel.append(label));
++
++            const currentDelay = s.get_int(profile.id + '-idle-delay');
++            let selectedIdx    = IDLE_OPTIONS.findIndex(([v]) => v === currentDelay);
++            if (selectedIdx < 0) selectedIdx = 3;
++
++            const idleRow = new Adw.ComboRow({
++                title:    'Tempo de tela',
++                subtitle: 'Tempo até o monitor desligar por inatividade',
++                model:    idleModel,
++                selected: selectedIdx,
++            });
++            idleRow.connect('notify::selected', row => {
++                s.set_int(profile.id + '-idle-delay', IDLE_OPTIONS[row.selected][0]);
++            });
++            s.connect('changed::' + profile.id + '-idle-delay', () => {
++                const delay = s.get_int(profile.id + '-idle-delay');
++                const idx   = IDLE_OPTIONS.findIndex(([v]) => v === delay);
++                if (idx >= 0) idleRow.selected = idx;
++            });
++            group.add(idleRow);
++        }
++    }
++}
+diff --git a/schemas/org.gnome.shell.extensions.powerfluxr.gschema.xml b/schemas/org.gnome.shell.extensions.powerfluxr.gschema.xml
+new file mode 100644
+index 0000000..8edc3c8
+--- /dev/null
++++ b/schemas/org.gnome.shell.extensions.powerfluxr.gschema.xml
+@@ -0,0 +1,42 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<schemalist>
++  <schema id="org.gnome.shell.extensions.powerfluxr"
++          path="/org/gnome/shell/extensions/powerfluxr/">
++
++    <key name="low-battery-threshold" type="i">
++      <range min="5" max="50"/>
++      <default>20</default>
++    </key>
++
++    <!-- Performance (AC) -->
++    <key name="performance-brightness" type="i">
++      <range min="1" max="100"/>
++      <default>100</default>
++    </key>
++    <key name="performance-idle-delay" type="i">
++      <range min="0" max="7200"/>
++      <default>900</default>
++    </key>
++
++    <!-- Balanced (bateria) -->
++    <key name="balanced-brightness" type="i">
++      <range min="1" max="100"/>
++      <default>70</default>
++    </key>
++    <key name="balanced-idle-delay" type="i">
++      <range min="0" max="7200"/>
++      <default>300</default>
++    </key>
++
++    <!-- Power Saver (bateria baixa) -->
++    <key name="power-saver-brightness" type="i">
++      <range min="1" max="100"/>
++      <default>40</default>
++    </key>
++    <key name="power-saver-idle-delay" type="i">
++      <range min="0" max="7200"/>
++      <default>120</default>
++    </key>
++
++  </schema>
++</schemalist>

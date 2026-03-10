@@ -10,3 +10,4 @@ schemas/gschemas.compiled
 
 # Packaged extension
 *.zip
+\n# Diff artifact\nbaseline.diff

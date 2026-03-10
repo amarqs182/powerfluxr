@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.powerfluxr"
+          path="/org/gnome/shell/extensions/powerfluxr/">
+
+    <key name="low-battery-threshold" type="i">
+      <range min="5" max="50"/>
+      <default>20</default>
+    </key>
+
+    <!-- Performance (AC) -->
+    <key name="performance-brightness" type="i">
+      <range min="1" max="100"/>
+      <default>100</default>
+    </key>
+    <key name="performance-idle-delay" type="i">
+      <range min="0" max="7200"/>
+      <default>900</default>
+    </key>
+
+    <!-- Balanced (bateria) -->
+    <key name="balanced-brightness" type="i">
+      <range min="1" max="100"/>
+      <default>70</default>
+    </key>
+    <key name="balanced-idle-delay" type="i">
+      <range min="0" max="7200"/>
+      <default>300</default>
+    </key>
+
+    <!-- Power Saver (bateria baixa) -->
+    <key name="power-saver-brightness" type="i">
+      <range min="1" max="100"/>
+      <default>40</default>
+    </key>
+    <key name="power-saver-idle-delay" type="i">
+      <range min="0" max="7200"/>
+      <default>120</default>
+    </key>
+
+  </schema>
+</schemalist>

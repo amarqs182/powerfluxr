@@ -1,0 +1,8 @@
+{
+  "uuid": "powerfluxr@local",
+  "name": "PowerFluxr",
+  "description": "Adaptive power management for GNOME — controls energy profile, brightness, screen timeout and hardware settings automatically",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": ""
+}

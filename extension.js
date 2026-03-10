@@ -1,5 +1,6 @@
-// PowerFluxr — extension.js v2.2
+// PowerFluxr — extension.js v2.3
 // Panel indicator: symbolic icon + battery time (both AC and battery).
+// Brightness via Main.brightnessManager.globalScale.value (GNOME 49 API oficial)
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -126,9 +127,11 @@ export default class PowerFluxr extends Extension {
         this._upowerChangedId = 0;
         this._batteryChangedId = 0;
         this._profilesChangedId = 0;
-        this._settingProfile = false;
+        this._expectedProfile = null;
         this._evalTimeout = null;
         this._lastBrightness = -1;
+        this._lastIdleDelay = -1;
+        this._sessionSettings = new Gio.Settings({ schema: 'org.gnome.desktop.session' });
 
         this._indicator = new PowerFluxrIndicator(this);
         Main.panel.addToStatusArea('powerfluxr', this._indicator);
@@ -157,7 +160,9 @@ export default class PowerFluxr extends Extension {
         this._batteryChangedId = 0;
         this._profilesChangedId = 0;
         this._lastBrightness = -1;
+        this._lastIdleDelay = -1;
         this._settings = null;
+        this._sessionSettings = null;
     }
 
     _initProxies() {
@@ -171,8 +176,8 @@ export default class PowerFluxr extends Extension {
                     (_p, changed) => {
                         const props = changed.deepUnpack();
                         if ('ActiveProfile' in props) {
-                            if (this._settingProfile) return;
                             const profile = props['ActiveProfile'].deepUnpack();
+                            if (this._expectedProfile === profile) return;
                             console.log('[PowerFluxr] Perfil manual → ' + profile);
                             this._indicator?.setProfile(profile);
                             this._applyBrightnessAndIdle(profile);
@@ -254,12 +259,10 @@ export default class PowerFluxr extends Extension {
 
         try {
             if (this._profilesProxy.ActiveProfile !== profile) {
-                this._settingProfile = true;
+                this._expectedProfile = profile;
                 this._profilesProxy.ActiveProfile = profile;
-                this._settingProfile = false;
             }
         } catch (e) {
-            this._settingProfile = false;
             console.error('[PowerFluxr] Erro ao setar perfil: ' + e);
         }
 
@@ -293,32 +296,50 @@ export default class PowerFluxr extends Extension {
         if (this._lastBrightness === percent) return;
         this._lastBrightness = percent;
         const safe = Math.max(1, Math.min(100, percent));
+
+        // 1. API oficial GNOME 49+ — mais estável e sem dependências
+        try {
+            Main.brightnessManager.globalScale.value = safe / 100;
+            console.log('[PowerFluxr] brilho=' + safe + '% (brightnessManager)');
+            return;
+        } catch (e) {
+            console.warn('[PowerFluxr] brightnessManager falhou: ' + e);
+        }
+
+        // 2. Fallback: slider interno (GNOME 45-48)
         try {
             const slider = Main.panel.statusArea.quickSettings
                 ._brightness.quickSettingsItems[0].slider;
             slider.value = safe / 100;
-            console.log('[PowerFluxr] brilho=' + safe + '% (slider nativo)');
+            console.log('[PowerFluxr] brilho=' + safe + '% (slider)');
+            return;
         } catch (e) {
-            console.warn('[PowerFluxr] Fallback brightnessctl: ' + e);
-            try {
-                const proc = Gio.Subprocess.new(
-                    ['brightnessctl', 'set', safe + '%'],
-                    Gio.SubprocessFlags.NONE
-                );
-                proc.wait_async(null, (_, res) => {
-                    try { proc.wait_finish(res); }
-                    catch (err) { console.error('[PowerFluxr] brightnessctl: ' + err); }
-                });
-            } catch (err) {
-                console.error('[PowerFluxr] Subprocess erro: ' + err);
-            }
+            console.warn('[PowerFluxr] slider falhou: ' + e);
+        }
+
+        // 3. Último recurso: brightnessctl
+        try {
+            const proc = Gio.Subprocess.new(
+                ['brightnessctl', 'set', safe + '%'],
+                Gio.SubprocessFlags.NONE
+            );
+            proc.wait_async(null, (_, res) => {
+                try { proc.wait_finish(res); }
+                catch (err) { console.error('[PowerFluxr] brightnessctl: ' + err); }
+            });
+            console.log('[PowerFluxr] brilho=' + safe + '% (brightnessctl)');
+        } catch (err) {
+            console.error('[PowerFluxr] Falha total no brilho: ' + err);
         }
     }
 
     _setIdleDelay(seconds) {
+        if (this._lastIdleDelay === seconds) return;
+        this._lastIdleDelay = seconds;
         try {
-            const ss = new Gio.Settings({ schema: 'org.gnome.desktop.session' });
-            ss.set_uint('idle-delay', seconds);
+            if (this._sessionSettings.get_uint('idle-delay') !== seconds) {
+                this._sessionSettings.set_uint('idle-delay', seconds);
+            }
         } catch (e) {
             console.error('[PowerFluxr] idle-delay: ' + e);
         }
